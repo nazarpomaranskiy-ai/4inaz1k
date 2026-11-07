@@ -17,7 +17,7 @@ import numpy as np
 from PIL import Image, ImageTk
 from analyze import Tracker, detect
 from planner import Shot, recommend
-from autododge import WindowsMovement, choose_movement
+from autododge import WindowsMovement, apply_observation
 from gamecapture import WindowsGameCapture
 from learning import VisionEngine
 from tracking import AdaptiveTracker,CameraMotion
@@ -323,6 +323,7 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
                               vision=vision.status if vision else 'LEGACY HSV',
                               unknown=vision.unknown if vision else [],camera=camera.confidence,
                               paths=[[(float(s.x+s.vx*t+.5*s.ax*t*t),float(s.y+s.vy*t+.5*s.ay*t*t)) for t in np.linspace(0,c['horizon'],9)] for s in shots[:80]],
+                              blocked_reason=('model missing' if vision and vision.model.model is None else 'too many candidate objects' if vision and vision.overflow else 'camera rotation / zoom' if camera.rotated else ''),
                               uncertain=bool(vision and (vision.overflow or vision.model.model is None)) or camera.rotated)
                 publish(result)
                 if log and stamp-last_save >= .2:
@@ -394,12 +395,18 @@ def main():
     thread.start()
     latest = None
     keys = {0x75:False,0x77:False,0x78:False}
+    notice = ''
+    f6_count = 0
     def close():
         movement.disarm()
         stop.set()
         root.destroy()
     def tick():
-        nonlocal latest
+        nonlocal latest,notice,f6_count
+        try:
+            latest = messages.get_nowait()
+        except queue.Empty:
+            pass
         for key in keys:
             pressed = bool(user32.GetAsyncKeyState(key)&0x8000)
             if pressed and not keys[key]:
@@ -407,10 +414,16 @@ def main():
                     close()
                     return
                 if key==0x75:
+                    f6_count+=1
                     if movement.armed():
-                        movement.disarm()
-                    elif not paused.is_set() and latest and 'error' not in latest and time.perf_counter()-latest['stamp']<.1:
-                        movement.arm()
+                        movement.disarm();notice='F6: automatic movement disabled'
+                    elif paused.is_set():
+                        notice='F6 blocked: press F8 to resume analysis'
+                    elif movement.arm():
+                        notice='F6: automatic movement enabled'
+                    else:
+                        notice='F6 blocked: '+(movement.error or 'click the RotMG game first')
+                    print(notice,flush=True)
                     keys[key] = pressed
                     continue
                 movement.disarm()
@@ -420,14 +433,7 @@ def main():
                 else:
                     paused.set()
             keys[key] = pressed
-        try:
-            latest = messages.get_nowait()
-        except queue.Empty:
-            pass
-        if paused.is_set() or not latest or 'error' in latest or latest.get('uncertain') or time.perf_counter()-latest['stamp']>.1:
-            movement.disarm()
-        else:
-            movement.update(choose_movement(latest,time.perf_counter()))
+        blocked = apply_observation(movement,latest,time.perf_counter(),paused.is_set())
         user32.SetWindowPos(user32.overlay_hwnd,wintypes.HWND(-1),0,0,0,0,0x13)
         canvas.delete('all')
         message = 'WAITING FOR TRACKS'
@@ -468,13 +474,12 @@ def main():
         canvas.create_oval(px-7,py-7,px+7,py+7,outline='white')
         canvas.create_rectangle(12,12, min(monitor['width']-12,1100),108,fill='#181818',outline='')
         canvas.create_text(22,28,text=message,fill=color,anchor='w',font=('Segoe UI',12,'bold'))
-        canvas.create_text(22,57,text=('AUTO ON' if movement.armed() else 'AUTO OFF')+' | F6 toggle | F8 pause | F9 exit | '+
+        canvas.create_text(22,57,text=(('AUTO WAIT: '+blocked) if movement.armed() and blocked else 'AUTO ON' if movement.armed() else 'AUTO OFF')+' | F6 toggle | F8 pause | F9 exit | '+
                            ('RECORDING ARENA' if record else 'no recording'),
                            fill='white',anchor='w',font=('Segoe UI',10))
         if latest and 'vision' in latest:
             canvas.create_text(22,82,text=latest['vision']+f' | camera {latest["camera"]:.0%}'+(' | INPUT BLOCKED: capacity/camera' if latest.get('uncertain') else ''),fill='#bbbbff',anchor='w')
-        if movement.error:
-            canvas.create_text(22,101,text=movement.error,fill='#ff5555',anchor='w')
+        canvas.create_text(22,101,text=movement.error or (notice+f' | F6 presses: {f6_count}'),fill='#ffcc88',anchor='w')
         root.after(20,tick)
     def callback_error(kind,value,traceback):
         movement.disarm()

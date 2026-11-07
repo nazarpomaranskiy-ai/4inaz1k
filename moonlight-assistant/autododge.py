@@ -30,6 +30,25 @@ def choose_movement(observation, now, danger_clearance=8, max_age=.10):
     return name
 
 
+def apply_observation(movement,observation,now,paused=False,max_age=.1):
+    """Temporary missing/uncertain observations release keys without losing F6 mode."""
+    if paused:
+        movement.disarm();return 'paused'
+    if observation and 'error' in observation:
+        movement.disarm();return 'capture error: '+str(observation['error'])
+    if not observation:
+        movement.update('');return 'waiting for first game frame'
+    if observation.get('unfocused'):
+        movement.update('');return 'waiting for focused game frame'
+    age=now-observation['stamp']
+    if age<0 or age>max_age:
+        movement.update('');return f'frame age {age*1000:.0f} ms (limit {max_age*1000:.0f})'
+    if observation.get('uncertain'):
+        movement.update('');return observation.get('blocked_reason','vision capacity / camera uncertainty')
+    movement.update(choose_movement(observation,now,max_age=max_age))
+    return ''
+
+
 class MovementState:
     """Pure lease state, separate from Windows for deterministic tests."""
     def __init__(self):
