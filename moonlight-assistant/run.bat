@@ -6,10 +6,10 @@ if "%~1"=="" (
  exit /b 1
 )
 if not exist .venv\Scripts\python.exe (
- py -3 -m venv .venv
+ py -3.12 -m venv .venv
  if errorlevel 1 goto failed
 )
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install --only-binary=:all: -r requirements.txt
 if errorlevel 1 goto failed
 .venv\Scripts\python.exe analyze.py "%~1" --output annotated.mp4
 if errorlevel 1 goto failed

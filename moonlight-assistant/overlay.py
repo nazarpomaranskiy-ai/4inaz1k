@@ -34,52 +34,182 @@ def local_config(cfg):
     return c
 
 
+def focus_game():
+    """Bring the exact RotMG game window forward; never send game input."""
+    if sys.platform != 'win32':
+        return False
+    user32 = ctypes.WinDLL('user32',use_last_error=True)
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindowTextW.argtypes = [wintypes.HWND,wintypes.LPWSTR,ctypes.c_int]
+    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user32.ShowWindow.argtypes = [wintypes.HWND,ctypes.c_int]
+    def title(hwnd):
+        buf = ctypes.create_unicode_buffer(512)
+        user32.GetWindowTextW(hwnd,buf,512)
+        return buf.value
+    windows = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL,wintypes.HWND,wintypes.LPARAM)
+    @callback_type
+    def collect(hwnd, unused):
+        if title(hwnd).replace(' ','').lower() == 'rotmgexalt':
+            windows.append(hwnd)
+        return True
+    user32.EnumWindows(collect,0)
+    if not windows:
+        return False
+    user32.ShowWindow(windows[0],9)
+    user32.SetForegroundWindow(windows[0])
+    return title(user32.GetForegroundWindow()).replace(' ','').lower() == 'rotmgexalt'
+
+
 def calibrate(monitor, path):
-    with mss.mss() as capture:
-        image = Image.frombytes('RGB', (monitor['width'],monitor['height']),
-                                capture.grab(monitor).rgb)
     cfg = json.loads((path if path.exists() else HERE/'config.json').read_text('utf-8'))
     root = tk.Tk()
-    root.title('Select arena, then click player hitbox. Esc cancels.')
-    scale = min(1, 1200/image.width, 760/image.height)
-    preview = ImageTk.PhotoImage(image.resize((round(image.width*scale),round(image.height*scale))))
-    canvas = tk.Canvas(root,width=preview.width(),height=preview.height(),highlightthickness=0)
+    root.title('Moonlight calibration: capturing game in 5 seconds')
+    scale = min(1,1100/monitor['width'],650/monitor['height'])
+    canvas = tk.Canvas(root,width=round(monitor['width']*scale),
+                       height=round(monitor['height']*scale),highlightthickness=0,bg='#181818')
     canvas.pack()
-    canvas.create_image(0,0,anchor='nw',image=preview)
-    state = {'start': None, 'rect': None, 'arena': None}
-    def down(e):
+    footer = tk.Frame(root)
+    footer.pack(fill='x')
+    lens = tk.Canvas(footer,width=160,height=160,bg='black',highlightthickness=0)
+    lens.pack(side='left')
+    controls = tk.Frame(footer)
+    controls.pack(side='left',fill='both',expand=True,padx=12)
+    status = tk.StringVar(value='Preparing a clean game screenshot...')
+    tk.Label(controls,textvariable=status,justify='left',wraplength=800).pack(anchor='w')
+    radius = tk.IntVar(value=int(cfg.get('player_radius',6)))
+    row = tk.Frame(controls)
+    row.pack(anchor='w')
+    tk.Label(row,text='Estimated hitbox radius (pixels):').pack(side='left')
+    tk.Spinbox(row,from_=1,to=30,textvariable=radius,width=5).pack(side='left')
+    tk.Label(controls,text='Radius is an estimate, not a hitbox extracted from game data.\n'
+             'R: retake in 5 sec | Backspace: reset | Enter: save | Esc: cancel',
+             justify='left').pack(anchor='w')
+    state = dict(image=None,preview=None,lens=None,start=None,arena=None,player=None,hover=None,busy=False)
+    def preview_radius():
+        try:
+            return max(1,min(30,radius.get()))
+        except (ValueError,tk.TclError):
+            return int(cfg.get('player_radius',6))
+    def draw():
+        canvas.delete('selection')
         if state['arena']:
-            px, py = round(e.x/scale), round(e.y/scale)
-            l,t,r,b = state['arena']
-            if not (l < px < r and t < py < b):
-                return
-            cfg.update(frame_size=[image.width,image.height],arena=state['arena'],
-                       player=[px,py],ignore_rectangles=[],monitor=monitor)
-            path.write_text(json.dumps(cfg,indent=2),encoding='utf-8')
-            root.destroy()
-            print(f'Calibration saved: {path}')
-        else:
-            state['start'] = (e.x,e.y)
-            if state['rect']:
-                canvas.delete(state['rect'])
-            state['rect'] = canvas.create_rectangle(e.x,e.y,e.x,e.y,outline='yellow',width=2)
-    def drag(e):
-        if state['start'] and not state['arena']:
-            canvas.coords(state['rect'],*state['start'],e.x,e.y)
-    def up(e):
-        if not state['start'] or state['arena']:
+            canvas.create_rectangle(*(v*scale for v in state['arena']),outline='yellow',width=2,tags='selection')
+        if state['player']:
+            x,y = state['player']
+            r = preview_radius()
+            canvas.create_oval((x-r)*scale,(y-r)*scale,(x+r)*scale,(y+r)*scale,
+                               outline='#00ff88',width=2,tags='selection')
+        point = state['player'] or state['hover']
+        if point and state['image']:
+            x,y = point
+            crop = state['image'].crop((x-20,y-20,x+20,y+20)).resize((160,160),Image.Resampling.NEAREST)
+            state['lens'] = ImageTk.PhotoImage(crop)
+            lens.delete('all')
+            lens.create_image(0,0,anchor='nw',image=state['lens'])
+            lens.create_line(0,80,160,80,fill='yellow')
+            lens.create_line(80,0,80,160,fill='yellow')
+            r = preview_radius()*4
+            lens.create_oval(80-r,80-r,80+r,80+r,outline='#00ff88',width=2)
+    def reset(event=None):
+        state.update(start=None,arena=None,player=None)
+        status.set('1. Drag around the playable area, excluding HUD and chat.')
+        draw()
+    def capture_now():
+        # Root stays withdrawn until after grab, preventing recursive screenshots.
+        if sys.platform=='win32' and not focus_game():
+            state['busy']=False
+            root.deiconify()
+            status.set('Could not focus RotMGExalt. Open the game, then press R to retry.')
             return
-        x,y = state['start']
-        l,r = sorted([round(x/scale),round(e.x/scale)])
-        t,b = sorted([round(y/scale),round(e.y/scale)])
-        l,t,r,b = max(0,l),max(0,t),min(image.width,r),min(image.height,b)
-        if r-l >= 100 and b-t >= 100:
-            state['arena'] = [l,t,r,b]
-            root.title('Now click the center of the player hitbox')
+        # Wait for the game/compositor to paint after foreground activation.
+        root.after(400,grab)
+    def grab():
+        try:
+            with mss.mss() as capture:
+                shot = capture.grab(monitor)
+                image = Image.frombytes('RGB',shot.size,shot.rgb)
+            state['image'] = image
+            state['preview'] = ImageTk.PhotoImage(image.resize((round(image.width*scale),round(image.height*scale))))
+            canvas.delete('all')
+            canvas.create_image(0,0,anchor='nw',image=state['preview'])
+            reset()
+        except Exception as exc:
+            status.set('Capture failed: '+str(exc))
+        finally:
+            state['busy']=False
+            root.deiconify()
+            root.lift()
+            root.title('Select arena, then player center; magnifier below; Enter to save')
+    def retake(event=None):
+        if state['busy']:
+            return
+        state['busy']=True
+        root.withdraw()
+        focus_game()
+        root.after(5000,capture_now)
+    def point(e):
+        return (round(e.x/scale),round(e.y/scale))
+    def down(e):
+        if not state['image'] or state['busy']:
+            return
+        x,y = point(e)
+        if state['arena']:
+            l,t,r,b = state['arena']
+            if l<x<r and t<y<b:
+                state['player']=(x,y)
+                status.set(f'Center: {x}, {y}. Check the 4x magnifier. Click again to adjust; Enter saves.')
+                draw()
+        else:
+            state['start']=(x,y)
+    def move(e):
+        state['hover']=point(e)
+        if state['start'] and not state['arena']:
+            canvas.delete('drag')
+            canvas.create_rectangle(state['start'][0]*scale,state['start'][1]*scale,
+                                    e.x,e.y,outline='yellow',width=2,tags='drag')
+        draw()
+    def up(e):
+        if state['start'] and not state['arena']:
+            x,y = point(e)
+            sx,sy = state['start']
+            l,r = sorted([sx,x]); t,b = sorted([sy,y])
+            l,t,r,b = max(0,l),max(0,t),min(monitor['width'],r),min(monitor['height'],b)
+            if r-l>=100 and b-t>=100:
+                state['arena']=[l,t,r,b]
+                status.set('2. Click the player center. Magnifier is below. Enter saves after selection.')
+            state['start']=None
+            canvas.delete('drag')
+            draw()
+    def save(event=None):
+        if not state['arena'] or not state['player']:
+            return
+        try:
+            r = radius.get()
+            if not 1<=r<=30:
+                raise ValueError('Radius must be 1–30 pixels')
+            cfg.update(frame_size=[monitor['width'],monitor['height']],arena=state['arena'],
+                       player=list(state['player']),player_radius=r,ignore_rectangles=[],monitor=monitor)
+            path.write_text(json.dumps(cfg,indent=2),encoding='utf-8')
+        except Exception as exc:
+            status.set(str(exc))
+            return
+        print(f'Calibration saved: {path}',flush=True)
+        root.destroy()
+    tk.Button(controls,text='Retake (5 sec)',command=retake).pack(side='left')
+    tk.Button(controls,text='Reset selection',command=reset).pack(side='left')
+    tk.Button(controls,text='Save',command=save).pack(side='left')
     canvas.bind('<ButtonPress-1>',down)
-    canvas.bind('<B1-Motion>',drag)
+    canvas.bind('<Motion>',move)
+    canvas.bind('<B1-Motion>',move)
     canvas.bind('<ButtonRelease-1>',up)
     root.bind('<Escape>',lambda e:root.destroy())
+    root.bind('<Return>',save)
+    root.bind('<BackSpace>',reset)
+    root.bind('<r>',retake)
+    root.bind('<R>',retake)
+    root.after(100,retake)
     root.mainloop()
 
 
