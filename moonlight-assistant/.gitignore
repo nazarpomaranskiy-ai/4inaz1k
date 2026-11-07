@@ -6,3 +6,7 @@ __pycache__/
 demo_preview.png
 live_config.json
 sessions/
+game_data/
+learning/
+models/
+*.backup*

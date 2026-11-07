@@ -7,6 +7,8 @@ import math
 import cv2
 import numpy as np
 from planner import Shot, recommend
+from learning import VisionEngine
+from tracking import AdaptiveTracker,CameraMotion
 
 class Tracker:
     def __init__(self, gate, max_speed):
@@ -66,6 +68,7 @@ def detect(frame, cfg):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('video', type=Path)
+    p.add_argument('--learned',action='store_true',help='Use locally trained detector and adaptive trajectories')
     p.add_argument('--config', type=Path, default=Path(__file__).with_name('config.json'))
     p.add_argument('--output', type=Path, default=Path('annotated.mp4'))
     p.add_argument('--snapshot', type=Path, help='Extract first frame and exit for calibration')
@@ -99,15 +102,20 @@ def main():
     out = cv2.VideoWriter(str(args.output), cv2.VideoWriter_fourcc(*'mp4v'), fps, (w,h))
     if not out.isOpened():
         p.error('Cannot create MP4 output')
-    tracker = Tracker(cfg['tracking_gate'], cfg['max_shot_speed'])
+    vision=VisionEngine(dict(cfg,collect_learning=False),Path(__file__).parent) if args.learned else None
+    if vision and vision.model.model is None:p.error('Train detector with prepare_learning.bat first')
+    camera=CameraMotion(cfg['player'])
+    tracker = (AdaptiveTracker if vision else Tracker)(cfg['tracking_gate'], cfg['max_shot_speed'])
     frame, index = first, 0
     try:
         with args.output.with_suffix('.csv').open('w', newline='', encoding='utf-8') as f:
             log = csv.writer(f)
             log.writerow(['seconds', 'detections', 'tracked', 'direction', 'clearance_px'])
             while True:
-                detections, mask = detect(frame, cfg)
-                shots = tracker.update(detections, 1/fps)
+                offset=camera.update(frame) if vision else (0,0)
+                detections, mask = vision.detect(frame) if vision else detect(frame, cfg)
+                tracked=tracker.update([(x+offset[0],y+offset[1],r) for x,y,r in detections],1/fps)
+                shots=[Shot(s.x-offset[0],s.y-offset[1],s.vx,s.vy,s.radius,s.ax,s.ay,s.uncertainty) for s in tracked]
                 best, _ = recommend(cfg['player'], shots, cfg['arena'], cfg['player_speed'],
                                     cfg['player_radius'], cfg['horizon'], cfg['margin'])
                 # Always show raw detections: essential to spot false positives.
@@ -139,6 +147,7 @@ def main():
                 if not ok:
                     break
     finally:
+        if vision:vision.close()
         cap.release()
         out.release()
     print(f'Analyzed {index} frames: {args.output} and {args.output.with_suffix(".csv")}')

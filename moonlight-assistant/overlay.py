@@ -19,6 +19,9 @@ from analyze import Tracker, detect
 from planner import Shot, recommend
 from autododge import WindowsMovement, choose_movement
 from gamecapture import WindowsGameCapture
+from learning import VisionEngine
+from tracking import AdaptiveTracker,CameraMotion
+from imaging import write_image
 
 HERE = Path(__file__).resolve().parent
 KEY = '#000000'
@@ -252,7 +255,10 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
         messages.put_nowait(value)
     c = local_config(cfg)
     l,t,r,b = cfg['arena']
-    tracker = Tracker(c['tracking_gate'],c['max_shot_speed'])
+    learned=cfg.get('vision_mode','learned')=='learned'
+    vision=VisionEngine(c,HERE) if learned else None
+    camera=CameraMotion(c['player'])
+    tracker = (AdaptiveTracker if learned else Tracker)(c['tracking_gate'],c['max_shot_speed'])
     log = None
     try:
         if record:
@@ -266,11 +272,13 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
             while not stop.is_set():
                 if paused.is_set():
                     previous = None
+                    camera.previous = None
                     tracker.tracks = []
                     stop.wait(.05)
                     continue
                 if movement and not movement.foreground():
                     previous = None
+                    camera.previous = None
                     tracker.tracks = []
                     publish(dict(stamp=time.perf_counter(),best=None,scores=[],tracks=0,
                                  detections=[],ms=0,unfocused=True))
@@ -291,20 +299,35 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
                 previous = stamp
                 if dt > .2:
                     tracker.tracks = []
-                detections,_ = detect(frame,c)
-                ox,oy = movement.position() if movement else (0,0)
+                offset=camera.update(frame)
+                if movement and movement.armed() and camera.confidence>.8 and dt<.15:
+                    vx,vy=movement.velocity(1)
+                    observed_speed=float(np.linalg.norm(camera.shift))/max(.001,dt)
+                    if (vx or vy) and 30<observed_speed<800:
+                        c['player_speed']=.95*c['player_speed']+.05*observed_speed
+                detections,_ = vision.detect(frame) if vision else detect(frame,c)
+                ox,oy = offset if learned else (movement.position() if movement else (0,0))
                 world_detections = [(x+ox,y+oy,radius) for x,y,radius in detections]
                 world_shots = tracker.update(world_detections,max(dt,.001))
-                shots = [Shot(s.x-ox,s.y-oy,s.vx,s.vy,s.radius) for s in world_shots]
+                shots = [Shot(s.x-ox,s.y-oy,s.vx,s.vy,s.radius,s.ax,s.ay,s.uncertainty) for s in world_shots]
+                # Advance capture-time estimates through processing latency.
+                latency=time.perf_counter()-stamp
+                for shot in shots:
+                    shot.x+=shot.vx*latency+.5*shot.ax*latency**2
+                    shot.y+=shot.vy*latency+.5*shot.ay*latency**2
+                    shot.vx+=shot.ax*latency;shot.vy+=shot.ay*latency
                 best, scores = recommend(c['player'],shots,c['arena'],c['player_speed'],
                                          c['player_radius'],c['horizon'],c['margin'])
                 result = dict(stamp=stamp,best=best,scores=scores,detections=detections,
-                              tracks=len(shots),ms=(time.perf_counter()-started)*1000)
+                              tracks=len(shots),ms=(time.perf_counter()-started)*1000,
+                              vision=vision.status if vision else 'LEGACY HSV',
+                              unknown=vision.unknown if vision else [],camera=camera.confidence,
+                              paths=[[(float(s.x+s.vx*t+.5*s.ax*t*t),float(s.y+s.vy*t+.5*s.ay*t*t)) for t in np.linspace(0,c['horizon'],9)] for s in shots[:80]],
+                              uncertain=bool(vision and (vision.overflow or vision.model.model is None)) or camera.rotated)
                 publish(result)
                 if log and stamp-last_save >= .2:
                     name = f'{index:07d}.jpg'
-                    if not cv2.imwrite(str(record/name),frame):
-                        raise RuntimeError('Cannot write observation image')
+                    write_image(record/name,frame)
                     log.write(json.dumps(dict(image=name,monotonic=stamp,best=best,
                                               tracks=[vars(s) for s in shots],
                                               label=None))+'\n')
@@ -314,6 +337,7 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
     except Exception as exc:
         publish({'error':str(exc),'stamp':time.perf_counter()})
     finally:
+        if vision:vision.close()
         if log:
             log.close()
 
@@ -400,7 +424,7 @@ def main():
             latest = messages.get_nowait()
         except queue.Empty:
             pass
-        if paused.is_set() or not latest or 'error' in latest or time.perf_counter()-latest['stamp']>.1:
+        if paused.is_set() or not latest or 'error' in latest or latest.get('uncertain') or time.perf_counter()-latest['stamp']>.1:
             movement.disarm()
         else:
             movement.update(choose_movement(latest,time.perf_counter()))
@@ -431,17 +455,26 @@ def main():
         elif latest and not valid:
             message = 'STALE CAPTURE: recommendation hidden'
         if valid and not paused.is_set() and 'detections' in latest:
-            for x,y,radius in latest['detections']:
+            for x,y,radius in latest['detections'][:180]:
                 x,y = x+l,y+t
                 canvas.create_oval(x-radius,y-radius,x+radius,y+radius,outline='#ffcc44')
+        if valid and not paused.is_set():
+            for x,y,radius in latest.get('unknown',[])[:60]:
+                x,y=x+l,y+t
+                canvas.create_oval(x-radius,y-radius,x+radius,y+radius,outline='#bb77ff')
+        if valid and not paused.is_set():
+            for path in latest.get('paths',[]):
+                canvas.create_line(*[v for x,y in path for v in (x+l,y+t)],fill='#4488cc',width=1)
         canvas.create_oval(px-7,py-7,px+7,py+7,outline='white')
-        canvas.create_rectangle(12,12, min(monitor['width']-12,920),82,fill='#181818',outline='')
+        canvas.create_rectangle(12,12, min(monitor['width']-12,1100),108,fill='#181818',outline='')
         canvas.create_text(22,28,text=message,fill=color,anchor='w',font=('Segoe UI',12,'bold'))
         canvas.create_text(22,57,text=('AUTO ON' if movement.armed() else 'AUTO OFF')+' | F6 toggle | F8 pause | F9 exit | '+
                            ('RECORDING ARENA' if record else 'no recording'),
                            fill='white',anchor='w',font=('Segoe UI',10))
+        if latest and 'vision' in latest:
+            canvas.create_text(22,82,text=latest['vision']+f' | camera {latest["camera"]:.0%}'+(' | INPUT BLOCKED: capacity/camera' if latest.get('uncertain') else ''),fill='#bbbbff',anchor='w')
         if movement.error:
-            canvas.create_text(22,76,text=movement.error,fill='#ff5555',anchor='w')
+            canvas.create_text(22,101,text=movement.error,fill='#ff5555',anchor='w')
         root.after(20,tick)
     def callback_error(kind,value,traceback):
         movement.disarm()

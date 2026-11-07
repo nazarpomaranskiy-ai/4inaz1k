@@ -1,15 +1,54 @@
 {
-  "frame_size": [1280, 720],
-  "arena": [160, 80, 1120, 680],
-  "player": [640, 360],
+  "frame_size": [
+    1280,
+    720
+  ],
+  "arena": [
+    160,
+    80,
+    1120,
+    680
+  ],
+  "player": [
+    640,
+    360
+  ],
   "player_radius": 6,
   "player_speed": 180,
   "horizon": 0.4,
   "margin": 5,
-  "bullet_hsv": [[[0, 140, 160], [10, 255, 255]], [[170, 140, 160], [179, 255, 255]]],
+  "bullet_hsv": [
+    [
+      [
+        0,
+        140,
+        160
+      ],
+      [
+        10,
+        255,
+        255
+      ]
+    ],
+    [
+      [
+        170,
+        140,
+        160
+      ],
+      [
+        179,
+        255,
+        255
+      ]
+    ]
+  ],
   "min_area": 5,
   "max_area": 180,
   "tracking_gate": 35,
   "max_shot_speed": 1400,
-  "ignore_rectangles": []
+  "ignore_rectangles": [],
+  "vision_mode": "learned",
+  "collect_learning": true,
+  "max_candidates": 600
 }

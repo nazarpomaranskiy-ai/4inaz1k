@@ -12,7 +12,7 @@ SCANCODES = {'W':0x11,'A':0x1e,'S':0x1f,'D':0x20}
 
 def choose_movement(observation, now, danger_clearance=8, max_age=.10):
     """Move only when staying is threatened and another action improves clearance."""
-    if not observation or 'error' in observation:
+    if not observation or 'error' in observation or observation.get('uncertain'):
         return ''
     if not 0 <= now-observation['stamp'] <= max_age:
         return ''

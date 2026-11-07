@@ -11,6 +11,11 @@ if "%~1"=="--calibrate" (
  if errorlevel 1 goto failed
  exit /b 0
 )
+if not exist models\projectile.xml (
+ echo Run prepare_learning.bat first to build the local projectile model.
+ pause
+ exit /b 1
+)
 if not exist live_config.json (
  echo Open the game in windowed or borderless mode before calibration.
  .venv\Scripts\python.exe overlay.py --calibrate
