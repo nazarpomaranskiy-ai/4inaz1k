@@ -4,3 +4,5 @@ __pycache__/
 *.mp4
 *.csv
 demo_preview.png
+live_config.json
+sessions/
