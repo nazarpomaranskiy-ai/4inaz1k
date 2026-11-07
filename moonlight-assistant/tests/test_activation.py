@@ -29,3 +29,19 @@ class ActivationTests(unittest.TestCase):
         obs=dict(stamp=10.02,tracks=3,best=('D',20,180,0),scores=[('STAY',-3,0,0),('D',20,180,0)])
         self.assertEqual(apply_observation(movement,obs,10.03),'')
         self.assertEqual(movement.direction,'D');self.assertTrue(movement.enabled)
+
+    def test_recent_plan_from_128ms_capture_can_run(self):
+        movement=FakeMovement()
+        obs=dict(stamp=10,decision_stamp=10.11,tracks=3,best=('D',20,180,0),scores=[('STAY',-3,0,0),('D',20,180,0)])
+        self.assertEqual(apply_observation(movement,obs,10.128),'')
+        self.assertEqual(movement.direction,'D')
+
+    def test_recent_plan_does_not_hide_old_capture(self):
+        movement=FakeMovement()
+        reason=apply_observation(movement,dict(stamp=10,decision_stamp=10.29),10.3)
+        self.assertIn('frame age',reason);self.assertEqual(movement.direction,'')
+
+    def test_old_plan_is_rejected_even_with_acceptable_capture_age(self):
+        movement=FakeMovement()
+        reason=apply_observation(movement,dict(stamp=10,decision_stamp=10.01),10.15)
+        self.assertIn('plan age',reason);self.assertEqual(movement.direction,'')

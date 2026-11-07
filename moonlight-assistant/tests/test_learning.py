@@ -54,3 +54,23 @@ class LearningTests(unittest.TestCase):
             loaded=PatchModel(path);prob=loaded.probabilities(images)
             self.assertGreater(float(prob[1::2].mean()),.7)
             self.assertLess(float(prob[::2].mean()),.3)
+
+    def test_reviewed_negative_memory_overrides_false_positive(self):
+        from types import SimpleNamespace
+        image=np.full((24,24,3),90,np.uint8)
+        cv2.circle(image,(12,12),5,(0,0,255),-1)
+        value=features(image);value/=np.linalg.norm(value)
+        model=PatchModel.__new__(PatchModel)
+        model.reload=lambda:None
+        model.model=SimpleNamespace(getVotes=lambda values,flags:np.array([[0,1],[0,10]],np.int32))
+        model.memory={0:value[None,:]}
+        self.assertEqual(float(model.probabilities([image])[0]),0)
+
+    def test_conflicting_corrections_do_not_force_a_label(self):
+        from types import SimpleNamespace
+        image=np.full((24,24,3),90,np.uint8)
+        value=features(image);value/=np.linalg.norm(value)
+        model=PatchModel.__new__(PatchModel);model.reload=lambda:None
+        model.model=SimpleNamespace(getVotes=lambda values,flags:np.array([[0,1],[4,6]],np.int32))
+        model.memory={0:value[None,:],1:value[None,:]}
+        self.assertAlmostEqual(float(model.probabilities([image])[0]),.6)

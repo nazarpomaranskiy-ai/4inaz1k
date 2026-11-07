@@ -17,7 +17,7 @@ import numpy as np
 from PIL import Image, ImageTk
 from analyze import Tracker, detect
 from planner import Shot, recommend
-from autododge import WindowsMovement, apply_observation
+from autododge import WindowsMovement, apply_observation, MAX_CAPTURE_AGE
 from gamecapture import WindowsGameCapture
 from learning import VisionEngine
 from tracking import AdaptiveTracker,CameraMotion
@@ -290,7 +290,7 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
                     stop.wait(.005)
                     continue
                 frame,stamp = sample
-                if time.perf_counter()-stamp > .1:
+                if time.perf_counter()-stamp > MAX_CAPTURE_AGE:
                     tracker.tracks = []
                     continue
                 if not np.any(frame):
@@ -325,6 +325,7 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
                               paths=[[(float(s.x+s.vx*t+.5*s.ax*t*t),float(s.y+s.vy*t+.5*s.ay*t*t)) for t in np.linspace(0,c['horizon'],9)] for s in shots[:80]],
                               blocked_reason=('model missing' if vision and vision.model.model is None else 'too many candidate objects' if vision and vision.overflow else 'camera rotation / zoom' if camera.rotated else ''),
                               uncertain=bool(vision and (vision.overflow or vision.model.model is None)) or camera.rotated)
+                result['decision_stamp']=time.perf_counter()
                 publish(result)
                 if log and stamp-last_save >= .2:
                     name = f'{index:07d}.jpg'
@@ -352,6 +353,7 @@ def main():
     args = p.parse_args()
     if sys.platform != 'win32':
         p.error('Live overlay requires Windows; use analyze.py for offline videos.')
+    cv2.setNumThreads(2)
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except OSError:

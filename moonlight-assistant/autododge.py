@@ -10,11 +10,24 @@ import time
 SCANCODES = {'W':0x11,'A':0x1e,'S':0x1f,'D':0x20}
 
 
-def choose_movement(observation, now, danger_clearance=8, max_age=.10):
+MAX_CAPTURE_AGE=.20
+MAX_PLAN_AGE=.08
+
+def freshness_reason(observation,now,max_capture_age=MAX_CAPTURE_AGE):
+    capture_age=now-observation['stamp']
+    plan_age=now-observation.get('decision_stamp',observation['stamp'])
+    if capture_age<0 or capture_age>max_capture_age:
+        return f'frame age {capture_age*1000:.0f} ms (limit {max_capture_age*1000:.0f})'
+    if plan_age<0 or plan_age>MAX_PLAN_AGE:
+        return f'plan age {plan_age*1000:.0f} ms (limit {MAX_PLAN_AGE*1000:.0f})'
+    return ''
+
+
+def choose_movement(observation, now, danger_clearance=8, max_age=MAX_CAPTURE_AGE):
     """Move only when staying is threatened and another action improves clearance."""
     if not observation or 'error' in observation or observation.get('uncertain'):
         return ''
-    if not 0 <= now-observation['stamp'] <= max_age:
+    if freshness_reason(observation,now,max_age):
         return ''
     best = observation.get('best')
     if not best or not observation.get('tracks'):
@@ -30,7 +43,7 @@ def choose_movement(observation, now, danger_clearance=8, max_age=.10):
     return name
 
 
-def apply_observation(movement,observation,now,paused=False,max_age=.1):
+def apply_observation(movement,observation,now,paused=False,max_age=MAX_CAPTURE_AGE):
     """Temporary missing/uncertain observations release keys without losing F6 mode."""
     if paused:
         movement.disarm();return 'paused'
@@ -40,9 +53,9 @@ def apply_observation(movement,observation,now,paused=False,max_age=.1):
         movement.update('');return 'waiting for first game frame'
     if observation.get('unfocused'):
         movement.update('');return 'waiting for focused game frame'
-    age=now-observation['stamp']
-    if age<0 or age>max_age:
-        movement.update('');return f'frame age {age*1000:.0f} ms (limit {max_age*1000:.0f})'
+    reason=freshness_reason(observation,now,max_age)
+    if reason:
+        movement.update('');return reason
     if observation.get('uncertain'):
         movement.update('');return observation.get('blocked_reason','vision capacity / camera uncertainty')
     movement.update(choose_movement(observation,now,max_age=max_age))

@@ -12,9 +12,11 @@ class CameraMotion:
         self.confidence=0.0;self.rotated=False;self.shift=np.zeros(2)
     def update(self,frame):
         gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
+        scale=min(1,640/max(gray.shape))
+        if scale<1:gray=cv2.resize(gray,None,fx=scale,fy=scale,interpolation=cv2.INTER_AREA)
         if self.previous is None or self.previous.shape!=gray.shape:
             self.previous=gray;self.confidence=0;return self.offset.copy()
-        points=cv2.goodFeaturesToTrack(self.previous,maxCorners=220,qualityLevel=.03,minDistance=12)
+        points=cv2.goodFeaturesToTrack(self.previous,maxCorners=160,qualityLevel=.03,minDistance=12)
         self.confidence=0;self.rotated=False;self.shift=np.zeros(2)
         if points is not None and len(points)>=12:
             moved,status,_=cv2.calcOpticalFlowPyrLK(self.previous,gray,points,None,
@@ -30,7 +32,7 @@ class CameraMotion:
                         scale=math.hypot(matrix[0,0],matrix[1,0])
                         self.rotated=abs(angle)>.015 or abs(scale-1)>.025
                         if ratio>.6 and not self.rotated:
-                            shift=matrix[:,:2]@self.player+matrix[:,2]-self.player
+                            shift=(matrix[:,:2]@(self.player*scale)+matrix[:,2]-self.player*scale)/scale
                             if np.linalg.norm(shift)<100:
                                 self.offset-=shift;self.shift=shift;self.confidence=ratio
         self.previous=gray

@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 import cv2
 import numpy as np
-from imaging import write_image
+from imaging import write_image,read_image
 
 HOG=cv2.HOGDescriptor((24,24),(12,12),(6,6),(6,6),9)
 
@@ -28,7 +28,7 @@ def patch_at(frame,x,y,radius):
 
 class PatchModel:
     def __init__(self,path):
-        self.path=Path(path);self.model=None;self.mtime=None;self.checked=0;self.threshold=.6
+        self.path=Path(path);self.model=None;self.mtime=None;self.checked=0;self.threshold=.6;self.memory_signature=None;self.memory={}
         self.reload()
     def reload(self):
         now=time.monotonic()
@@ -42,6 +42,28 @@ class PatchModel:
             self.model=model;self.mtime=mtime
             report=self.path.with_name('report.json')
             if report.exists():self.threshold=float(json.loads(report.read_text('utf-8')).get('selected_threshold',.6))
+        directory=self.path.parent.parent/'learning/labeled'
+        selected=[]
+        for label,name,limit in [(0,'other',512),(1,'bullet',256)]:
+            paths=sorted((directory/name).glob('*.png'),key=lambda p:p.stat().st_mtime_ns,reverse=True)[:limit]
+            for path in paths:
+                metadata=path.with_suffix('.png.json')
+                try:
+                    reviewed=metadata.exists() and json.loads(metadata.read_text()).get('human_review')
+                except (OSError,json.JSONDecodeError):
+                    continue
+                if reviewed:selected.append((label,path,path.stat().st_mtime_ns))
+        signature=tuple((label,str(path),stamp) for label,path,stamp in selected)
+        if signature!=self.memory_signature:
+            memory={}
+            for label,path,_ in selected:
+                patch=read_image(path)
+                if patch is None:continue
+                value=features(patch);value/=max(1e-6,np.linalg.norm(value))
+                memory.setdefault(label,[]).append(value)
+            self.memory={label:np.stack(values).astype(np.float32) for label,values in memory.items()}
+            self.memory_signature=signature
+
     def probabilities(self,patches):
         self.reload()
         if not patches or self.model is None:return np.zeros(len(patches),np.float32)
@@ -49,7 +71,17 @@ class PatchModel:
         votes=self.model.getVotes(values,0)
         classes=votes[0];positive=np.flatnonzero(classes==1)
         if not len(positive):return np.zeros(len(patches),np.float32)
-        return votes[1:,positive[0]]/np.maximum(1,votes[1:].sum(axis=1))
+        scores=votes[1:,positive[0]]/np.maximum(1,votes[1:].sum(axis=1))
+        normalized=values/np.maximum(1e-6,np.linalg.norm(values,axis=1,keepdims=True))
+        distances={}
+        for label in (0,1):
+            bank=self.memory.get(label)
+            distances[label]=(cv2.batchDistance(normalized,bank,cv2.CV_32F,normType=cv2.NORM_L2,K=1)[0][:,0]
+                              if bank is not None else np.full(len(values),np.inf))
+        negative,positive_distance=distances[0],distances[1]
+        scores=np.where((negative<.16)&(negative+.03<positive_distance),0,scores)
+        scores=np.where((positive_distance<.16)&(positive_distance+.03<negative),1,scores)
+        return scores
 
 class ImageSink:
     def __init__(self):
