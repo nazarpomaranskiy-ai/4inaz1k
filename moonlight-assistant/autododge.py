@@ -2,6 +2,7 @@
 import ctypes
 from ctypes import wintypes
 import math
+import os
 import sys
 import threading
 import time
@@ -51,6 +52,7 @@ class WindowsMovement:
             raise RuntimeError('Windows input is only available on Windows')
         self.user32 = ctypes.WinDLL('user32',use_last_error=True)
         self.user32.GetForegroundWindow.restype = wintypes.HWND
+        self.user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,ctypes.POINTER(wintypes.DWORD)]
         self.user32.GetWindowTextW.argtypes = [wintypes.HWND,wintypes.LPWSTR,ctypes.c_int]
         self.user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
         self.user32.GetAsyncKeyState.restype = ctypes.c_short
@@ -82,8 +84,15 @@ class WindowsMovement:
         self.thread.start()
 
     def foreground(self):
+        hwnd = self.user32.GetForegroundWindow()
+        pid = wintypes.DWORD()
+        self.user32.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
+        # GetWindowText on our own Tk window can send a synchronous message;
+        # never make that call from a watchdog while the UI waits on its lock.
+        if pid.value == os.getpid():
+            return False
         buf = ctypes.create_unicode_buffer(512)
-        self.user32.GetWindowTextW(self.user32.GetForegroundWindow(),buf,512)
+        self.user32.GetWindowTextW(hwnd,buf,512)
         return buf.value.replace(' ','').lower() == 'rotmgexalt'
 
     def _send(self,key,up):
@@ -158,9 +167,10 @@ class WindowsMovement:
     def _watch(self):
         try:
             while not self.stop.is_set():
+                abort = any(self.user32.GetAsyncKeyState(key)&0x8000 for key in (0x77,0x78))
+                foreground = self.foreground()
                 with self.lock:
-                    abort = any(self.user32.GetAsyncKeyState(key)&0x8000 for key in (0x77,0x78))
-                    desired = self.state.desired(time.perf_counter(),self.foreground(),abort)
+                    desired = self.state.desired(time.perf_counter(),foreground,abort)
                     self._apply(desired)
                 self.stop.wait(.015)
         except Exception as exc:

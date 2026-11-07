@@ -18,9 +18,10 @@ from PIL import Image, ImageTk
 from analyze import Tracker, detect
 from planner import Shot, recommend
 from autododge import WindowsMovement, choose_movement
+from gamecapture import WindowsGameCapture
 
 HERE = Path(__file__).resolve().parent
-KEY = '#010203'
+KEY = '#000000'
 
 
 def local_config(cfg):
@@ -217,7 +218,7 @@ def calibrate(monitor, path):
 
 
 def configure_window(root):
-    """Click-through, no activation, and exclusion from desktop capture."""
+    """Click-through, no activation. Game capture targets its own window."""
     root.update_idletasks()
     user32 = ctypes.WinDLL('user32',use_last_error=True)
     user32.GetParent.argtypes = [wintypes.HWND]
@@ -231,12 +232,14 @@ def configure_window(root):
     set_style.restype = ctypes.c_long
     style = get_style(hwnd,-20)
     set_style(hwnd,-20,style | 0x80000 | 0x20 | 0x08000000 | 0x80)
-    user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND,wintypes.DWORD]
-    user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
-    if sys.getwindowsversion().build < 19041:
-        raise RuntimeError('Capture exclusion requires Windows 10 build 19041 or newer.')
-    if not user32.SetWindowDisplayAffinity(hwnd,0x11):
+    user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND,wintypes.DWORD,ctypes.c_ubyte,wintypes.DWORD]
+    user32.SetLayeredWindowAttributes.restype = wintypes.BOOL
+    if not user32.SetLayeredWindowAttributes(hwnd,0,255,1):
         raise ctypes.WinError(ctypes.get_last_error())
+    user32.SetWindowPos.argtypes = [wintypes.HWND,wintypes.HWND,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_int,wintypes.UINT]
+    user32.SetWindowPos.restype = wintypes.BOOL
+    user32.SetWindowPos(hwnd,wintypes.HWND(-1),0,0,0,0,0x13)
+    user32.overlay_hwnd = hwnd
     return user32
 
 
@@ -249,7 +252,6 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
         messages.put_nowait(value)
     c = local_config(cfg)
     l,t,r,b = cfg['arena']
-    region = dict(left=monitor['left']+l,top=monitor['top']+t,width=r-l,height=b-t)
     tracker = Tracker(c['tracking_gate'],c['max_shot_speed'])
     log = None
     try:
@@ -257,7 +259,7 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
             record.mkdir(parents=True,exist_ok=False)
             (record/'calibration.json').write_text(json.dumps(cfg,indent=2),encoding='utf-8')
             log = (record/'observations.jsonl').open('w',encoding='utf-8')
-        with mss.mss() as capture:
+        with WindowsGameCapture(monitor,cfg['arena']) as capture:
             previous = None
             last_save = 0
             index = 0
@@ -275,8 +277,16 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
                     stop.wait(.05)
                     continue
                 started = time.perf_counter()
-                frame = np.asarray(capture.grab(region))[:,:,:3].copy()
-                stamp = time.perf_counter()
+                sample = capture.read()
+                if sample is None:
+                    stop.wait(.005)
+                    continue
+                frame,stamp = sample
+                if time.perf_counter()-stamp > .1:
+                    tracker.tracks = []
+                    continue
+                if not np.any(frame):
+                    raise RuntimeError('Black game frame: movement disabled; check game capture')
                 dt = stamp-previous if previous is not None else 1/30
                 previous = stamp
                 if dt > .2:
@@ -394,6 +404,7 @@ def main():
             movement.disarm()
         else:
             movement.update(choose_movement(latest,time.perf_counter()))
+        user32.SetWindowPos(user32.overlay_hwnd,wintypes.HWND(-1),0,0,0,0,0x13)
         canvas.delete('all')
         message = 'WAITING FOR TRACKS'
         color = '#ffcc44'

@@ -1,5 +1,7 @@
 import unittest
-from autododge import MovementState,choose_movement
+from autododge import MovementState,choose_movement,WindowsMovement
+import os
+from types import SimpleNamespace
 
 class AutododgeTests(unittest.TestCase):
     def observation(self,gap=-4,bestgap=20):
@@ -32,3 +34,14 @@ class AutododgeTests(unittest.TestCase):
         state=MovementState(); state.armed=True; state.direction='S'; state.deadline=12
         self.assertEqual(state.desired(10,True,True),set())
         self.assertFalse(state.armed)
+
+    def test_own_window_focus_does_not_send_synchronous_tk_message(self):
+        movement=WindowsMovement.__new__(WindowsMovement)
+        def owner(hwnd,pid):
+            pid._obj.value=os.getpid()
+        def forbidden(*args):
+            raise AssertionError('Must not call GetWindowText for our own Tk window')
+        movement.user32=SimpleNamespace(GetForegroundWindow=lambda:123,
+                                        GetWindowThreadProcessId=owner,
+                                        GetWindowTextW=forbidden)
+        self.assertFalse(movement.foreground())
