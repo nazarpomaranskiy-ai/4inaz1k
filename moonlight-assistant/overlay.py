@@ -1,4 +1,4 @@
-"""Windows live advisory overlay. Never sends game input."""
+"""Windows overlay with optional, foreground-only WASD dodge control."""
 import argparse
 import ctypes
 from ctypes import wintypes
@@ -16,7 +16,8 @@ import mss
 import numpy as np
 from PIL import Image, ImageTk
 from analyze import Tracker, detect
-from planner import recommend
+from planner import Shot, recommend
+from autododge import WindowsMovement, choose_movement
 
 HERE = Path(__file__).resolve().parent
 KEY = '#010203'
@@ -239,7 +240,7 @@ def configure_window(root):
     return user32
 
 
-def worker(cfg, monitor, messages, stop, paused, record):
+def worker(cfg, monitor, messages, stop, paused, record, movement=None):
     def publish(value):
         try:
             messages.get_nowait()
@@ -266,6 +267,13 @@ def worker(cfg, monitor, messages, stop, paused, record):
                     tracker.tracks = []
                     stop.wait(.05)
                     continue
+                if movement and not movement.foreground():
+                    previous = None
+                    tracker.tracks = []
+                    publish(dict(stamp=time.perf_counter(),best=None,scores=[],tracks=0,
+                                 detections=[],ms=0,unfocused=True))
+                    stop.wait(.05)
+                    continue
                 started = time.perf_counter()
                 frame = np.asarray(capture.grab(region))[:,:,:3].copy()
                 stamp = time.perf_counter()
@@ -274,7 +282,10 @@ def worker(cfg, monitor, messages, stop, paused, record):
                 if dt > .2:
                     tracker.tracks = []
                 detections,_ = detect(frame,c)
-                shots = tracker.update(detections,max(dt,.001))
+                ox,oy = movement.position() if movement else (0,0)
+                world_detections = [(x+ox,y+oy,radius) for x,y,radius in detections]
+                world_shots = tracker.update(world_detections,max(dt,.001))
+                shots = [Shot(s.x-ox,s.y-oy,s.vx,s.vy,s.radius) for s in world_shots]
                 best, scores = recommend(c['player'],shots,c['arena'],c['player_speed'],
                                          c['player_radius'],c['horizon'],c['margin'])
                 result = dict(stamp=stamp,best=best,scores=scores,detections=detections,
@@ -341,14 +352,16 @@ def main():
         raise
     user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
     user32.GetAsyncKeyState.restype = ctypes.c_short
+    movement = WindowsMovement(cfg['player_speed'])
     stop,paused = threading.Event(),threading.Event()
     messages = queue.Queue(maxsize=1)
     record = HERE/'sessions'/datetime.now().strftime('%Y%m%d-%H%M%S-%f') if args.record else None
-    thread = threading.Thread(target=worker,args=(cfg,monitor,messages,stop,paused,record),daemon=True)
+    thread = threading.Thread(target=worker,args=(cfg,monitor,messages,stop,paused,record,movement),daemon=True)
     thread.start()
     latest = None
-    keys = {0x77:False,0x78:False}
+    keys = {0x75:False,0x77:False,0x78:False}
     def close():
+        movement.disarm()
         stop.set()
         root.destroy()
     def tick():
@@ -359,6 +372,14 @@ def main():
                 if key==0x78:
                     close()
                     return
+                if key==0x75:
+                    if movement.armed():
+                        movement.disarm()
+                    elif not paused.is_set() and latest and 'error' not in latest and time.perf_counter()-latest['stamp']<.1:
+                        movement.arm()
+                    keys[key] = pressed
+                    continue
+                movement.disarm()
                 if paused.is_set():
                     paused.clear()
                     latest = None
@@ -369,12 +390,18 @@ def main():
             latest = messages.get_nowait()
         except queue.Empty:
             pass
+        if paused.is_set() or not latest or 'error' in latest or time.perf_counter()-latest['stamp']>.1:
+            movement.disarm()
+        else:
+            movement.update(choose_movement(latest,time.perf_counter()))
         canvas.delete('all')
         message = 'WAITING FOR TRACKS'
         color = '#ffcc44'
         valid = latest and time.perf_counter()-latest['stamp'] < .2
         if paused.is_set():
             message = 'PAUSED'
+        elif latest and latest.get('unfocused'):
+            message = 'GAME NOT FOCUSED: movement disabled'
         elif latest and 'error' in latest:
             message = 'ERROR: '+latest['error']
         elif valid and latest['best']:
@@ -399,16 +426,24 @@ def main():
         canvas.create_oval(px-7,py-7,px+7,py+7,outline='white')
         canvas.create_rectangle(12,12, min(monitor['width']-12,920),82,fill='#181818',outline='')
         canvas.create_text(22,28,text=message,fill=color,anchor='w',font=('Segoe UI',12,'bold'))
-        canvas.create_text(22,57,text='EXPERIMENTAL | F8 pause | F9 exit | fixed player/camera | '+
+        canvas.create_text(22,57,text=('AUTO ON' if movement.armed() else 'AUTO OFF')+' | F6 toggle | F8 pause | F9 exit | '+
                            ('RECORDING ARENA' if record else 'no recording'),
                            fill='white',anchor='w',font=('Segoe UI',10))
-        root.after(33,tick)
+        if movement.error:
+            canvas.create_text(22,76,text=movement.error,fill='#ff5555',anchor='w')
+        root.after(20,tick)
+    def callback_error(kind,value,traceback):
+        movement.disarm()
+        print(f'Overlay callback error: {value}',file=sys.stderr,flush=True)
+        close()
+    root.report_callback_exception = callback_error
     root.protocol('WM_DELETE_WINDOW',close)
     try:
         tick()
         root.mainloop()
     finally:
         stop.set()
+        movement.close()
         thread.join(timeout=2)
 
 if __name__ == '__main__':
