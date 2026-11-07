@@ -120,6 +120,7 @@ def calibrate(monitor, path):
         # Root stays withdrawn until after grab, preventing recursive screenshots.
         if sys.platform=='win32' and not focus_game():
             state['busy']=False
+            root.attributes('-topmost',True)
             root.deiconify()
             status.set('Could not focus RotMGExalt. Open the game, then press R to retry.')
             return
@@ -139,6 +140,7 @@ def calibrate(monitor, path):
             status.set('Capture failed: '+str(exc))
         finally:
             state['busy']=False
+            root.attributes('-topmost',True)
             root.deiconify()
             root.lift()
             root.title('Select arena, then player center; magnifier below; Enter to save')
