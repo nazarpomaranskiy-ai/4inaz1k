@@ -1,0 +1,18 @@
+{
+  "scope": "Fire Missile only; manually reviewed calibration and check frames from capture 20261108-020652",
+  "frames": {
+    "0": {"targets": [], "kind": "negative Vault"},
+    "50": {"targets": [], "kind": "negative Vault"},
+    "100": {"targets": [], "kind": "negative Vault"},
+    "150": {"targets": [], "kind": "negative Vault"},
+    "200": {"targets": [], "kind": "negative Vault"},
+    "250": {"targets": [], "kind": "negative Vault"},
+    "900": {"targets": [], "kind": "negative for this projectile family"},
+    "980": {"targets": [], "kind": "negative for this projectile family"},
+    "1000": {"targets": [[836,218],[795,496],[637,495]], "kind": "calibration positives"},
+    "1010": {"targets": [[1066,75],[972,696]], "kind": "check positives"},
+    "1030": {"targets": [[844,428]], "kind": "check positive"},
+    "1100": {"targets": [], "kind": "negative for this projectile family"},
+    "1200": {"targets": [], "kind": "negative for this projectile family"}
+  }
+}

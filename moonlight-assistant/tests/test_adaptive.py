@@ -42,3 +42,12 @@ class AdaptiveTests(unittest.TestCase):
         _,scores=recommend((100,100),[Shot(40,100,0,0,3,ax=800)],(0,0,200,200),speed=100,horizon=.4)
         stay=next(s for s in scores if s[0]=='STAY')
         self.assertLess(stay[1],0)
+
+    def test_current_track_position_is_anchored_to_observation(self):
+        tracker=AdaptiveTracker()
+        for i in range(12):
+            x=100+i*2+5*np.sin(i)
+            shots=tracker.update([(x,80,3)],1/30)
+        self.assertEqual(len(shots),1)
+        self.assertAlmostEqual(shots[0].x,x,places=6)
+        self.assertAlmostEqual(shots[0].y,80,places=6)

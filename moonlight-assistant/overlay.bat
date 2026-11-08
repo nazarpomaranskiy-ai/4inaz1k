@@ -11,8 +11,8 @@ if "%~1"=="--calibrate" (
  if errorlevel 1 goto failed
  exit /b 0
 )
-if not exist models\projectile.xml (
- echo Run prepare_learning.bat first to build the local projectile model.
+if not exist game_data\catalog.json (
+ echo Run prepare_pilot.bat first to extract the local projectile reference.
  pause
  exit /b 1
 )

@@ -17,11 +17,12 @@ import numpy as np
 from PIL import Image, ImageTk
 from analyze import Tracker, detect
 from planner import Shot, recommend
-from autododge import WindowsMovement, apply_observation, MAX_CAPTURE_AGE
+from autododge import WindowsMovement, apply_observation, MAX_CAPTURE_AGE, BurstLimiter
 from gamecapture import WindowsGameCapture
 from learning import VisionEngine
 from tracking import AdaptiveTracker,CameraMotion
 from imaging import write_image
+from realm_pilot import RealmPilot,confirmed_shots,merge_pilot_motion
 
 HERE = Path(__file__).resolve().parent
 KEY = '#000000'
@@ -255,12 +256,23 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
         messages.put_nowait(value)
     c = local_config(cfg)
     l,t,r,b = cfg['arena']
-    learned=cfg.get('vision_mode','learned')=='learned'
-    vision=VisionEngine(c,HERE) if learned else None
+    neural=cfg.get('vision_mode')=='realm_neural'
+    pilot=neural or cfg.get('vision_mode')=='realm_pilot'
+    learned=pilot or cfg.get('vision_mode','learned')=='learned'
+    vision=None
     camera=CameraMotion(c['player'])
     tracker = (AdaptiveTracker if learned else Tracker)(c['tracking_gate'],c['max_shot_speed'])
+    if pilot:
+        tracker.retain_seconds=.25
+        tracker.gate=80
     log = None
     try:
+        # Initialization errors must reach the UI, rather than leaving AUTO WAIT forever.
+        if neural:
+            from neural_detector import NeuralFireDetector
+            vision=NeuralFireDetector(c,HERE)
+        else:
+            vision=RealmPilot(c,HERE) if pilot else VisionEngine(c,HERE) if learned else None
         if record:
             record.mkdir(parents=True,exist_ok=False)
             (record/'calibration.json').write_text(json.dumps(cfg,indent=2),encoding='utf-8')
@@ -305,10 +317,12 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
                     observed_speed=float(np.linalg.norm(camera.shift))/max(.001,dt)
                     if (vx or vy) and 30<observed_speed<800:
                         c['player_speed']=.95*c['player_speed']+.05*observed_speed
-                detections,_ = vision.detect(frame) if vision else detect(frame,c)
+                hints=[(*tuple(track.predict(tracker.stamp+dt)-offset),track.radius) for track in tracker.tracks if tracker.stamp-track.history[-1][0]<.2] if pilot else []
+                detections,_ = vision.detect(frame,shift=camera.shift,camera_confidence=camera.confidence,hints=hints,dt=dt) if pilot else vision.detect(frame) if vision else detect(frame,c)
                 ox,oy = offset if learned else (movement.position() if movement else (0,0))
                 world_detections = [(x+ox,y+oy,radius) for x,y,radius in detections]
                 world_shots = tracker.update(world_detections,max(dt,.001))
+                if pilot:world_shots=merge_pilot_motion(tracker,world_shots,vision,offset)
                 shots = [Shot(s.x-ox,s.y-oy,s.vx,s.vy,s.radius,s.ax,s.ay,s.uncertainty) for s in world_shots]
                 # Advance capture-time estimates through processing latency.
                 latency=time.perf_counter()-stamp
@@ -318,13 +332,16 @@ def worker(cfg, monitor, messages, stop, paused, record, movement=None):
                     shot.vx+=shot.ax*latency;shot.vy+=shot.ay*latency
                 best, scores = recommend(c['player'],shots,c['arena'],c['player_speed'],
                                          c['player_radius'],c['horizon'],c['margin'])
+                model_missing=bool(vision and (not len(vision.bank) if pilot else vision.model.model is None))
+                unsupported=bool(pilot and not vision.scene_supported)
+                if pilot:detections=[(float(s.x),float(s.y),float(s.radius)) for s in shots]
                 result = dict(stamp=stamp,best=best,scores=scores,detections=detections,
                               tracks=len(shots),ms=(time.perf_counter()-started)*1000,
                               vision=vision.status if vision else 'LEGACY HSV',
-                              unknown=vision.unknown if vision else [],camera=camera.confidence,
+                              unknown=[] if pilot else vision.unknown if vision else [],camera=camera.confidence,
                               paths=[[(float(s.x+s.vx*t+.5*s.ax*t*t),float(s.y+s.vy*t+.5*s.ay*t*t)) for t in np.linspace(0,c['horizon'],9)] for s in shots[:80]],
-                              blocked_reason=('model missing' if vision and vision.model.model is None else 'too many candidate objects' if vision and vision.overflow else 'camera rotation / zoom' if camera.rotated else ''),
-                              uncertain=bool(vision and (vision.overflow or vision.model.model is None)) or camera.rotated)
+                              blocked_reason=('reference missing' if model_missing else 'pilot supports open Realm only' if unsupported else 'too many candidate objects' if vision and vision.overflow else 'camera rotation / zoom' if camera.rotated else ''),
+                              uncertain=model_missing or unsupported or bool(vision and vision.overflow) or camera.rotated)
                 result['decision_stamp']=time.perf_counter()
                 publish(result)
                 if log and stamp-last_save >= .2:
@@ -349,6 +366,8 @@ def main():
     p.add_argument('--calibrate',action='store_true')
     p.add_argument('--monitor',type=int,default=1)
     p.add_argument('--config',type=Path,default=HERE/'live_config.json')
+    p.add_argument('--pilot-motion',action='store_true',help='Enable F6 for a guarded Fire Missile pilot after replay checks')
+    p.add_argument('--neural',action='store_true',help='Experimental one-class neural detector; advisory only, no automatic movement')
     p.add_argument('--record',action='store_true',help='Save arena screenshots + unlabeled observations')
     args = p.parse_args()
     if sys.platform != 'win32':
@@ -368,6 +387,10 @@ def main():
     if not args.config.exists():
         p.error('Run overlay.py --calibrate first.')
     cfg = json.loads(args.config.read_text('utf-8'))
+    cfg['vision_mode']='realm_neural' if args.neural else 'realm_pilot'
+    validation_path=HERE/'pilot_validation.json'
+    validation=json.loads(validation_path.read_text('utf-8')) if validation_path.exists() else {}
+    replay_ok=(not args.neural and validation.get('detector')=='realm-fire-missile-pilot' and validation.get('targets',0)>=6 and validation.get('recall',0)>=.8 and validation.get('false_positive',1)==0)
     if cfg.get('monitor') != monitor:
         p.error('Monitor geometry changed. Calibrate again.')
     l,t,r,b = cfg['arena']
@@ -389,7 +412,8 @@ def main():
         raise
     user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
     user32.GetAsyncKeyState.restype = ctypes.c_short
-    movement = WindowsMovement(cfg['player_speed'])
+    movement = WindowsMovement(cfg['player_speed'],lease=.06)
+    limiter=BurstLimiter()
     stop,paused = threading.Event(),threading.Event()
     messages = queue.Queue(maxsize=1)
     record = HERE/'sessions'/datetime.now().strftime('%Y%m%d-%H%M%S-%f') if args.record else None
@@ -419,6 +443,12 @@ def main():
                     f6_count+=1
                     if movement.armed():
                         movement.disarm();notice='F6: automatic movement disabled'
+                    elif args.neural:
+                        notice='Neural detector is advisory only: dodge validation has not passed'
+                    elif not args.pilot_motion:
+                        notice='Advisory only: use realm_pilot.bat for guarded motion test'
+                    elif not replay_ok:
+                        notice='Pilot replay check has not passed; motion remains disabled'
                     elif paused.is_set():
                         notice='F6 blocked: press F8 to resume analysis'
                     elif movement.arm():
@@ -435,7 +465,8 @@ def main():
                 else:
                     paused.set()
             keys[key] = pressed
-        blocked = apply_observation(movement,latest,time.perf_counter(),paused.is_set())
+        if not movement.armed():limiter.reset()
+        blocked = apply_observation(movement,latest,time.perf_counter(),paused.is_set(),limiter=limiter)
         user32.SetWindowPos(user32.overlay_hwnd,wintypes.HWND(-1),0,0,0,0,0x13)
         canvas.delete('all')
         message = 'WAITING FOR TRACKS'
@@ -476,7 +507,7 @@ def main():
         canvas.create_oval(px-7,py-7,px+7,py+7,outline='white')
         canvas.create_rectangle(12,12, min(monitor['width']-12,1100),108,fill='#181818',outline='')
         canvas.create_text(22,28,text=message,fill=color,anchor='w',font=('Segoe UI',12,'bold'))
-        canvas.create_text(22,57,text=(('AUTO WAIT: '+blocked) if movement.armed() and blocked else 'AUTO ON' if movement.armed() else 'AUTO OFF')+' | F6 toggle | F8 pause | F9 exit | '+
+        canvas.create_text(22,57,text=(('AUTO WAIT: '+blocked) if movement.armed() and blocked else 'AUTO ON' if movement.armed() else 'AUTO OFF')+' | FIRE MISSILE PILOT | F6 toggle | F8 pause | F9 exit | '+
                            ('RECORDING ARENA' if record else 'no recording'),
                            fill='white',anchor='w',font=('Segoe UI',10))
         if latest and 'vision' in latest:

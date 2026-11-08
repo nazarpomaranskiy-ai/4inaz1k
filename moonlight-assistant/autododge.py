@@ -43,7 +43,23 @@ def choose_movement(observation, now, danger_clearance=8, max_age=MAX_CAPTURE_AG
     return name
 
 
-def apply_observation(movement,observation,now,paused=False,max_age=MAX_CAPTURE_AGE):
+class BurstLimiter:
+    """Bound pilot motion to short strafes separated by a cooldown."""
+    def __init__(self,duration=.06,cooldown=.10):
+        self.duration=duration;self.cooldown=cooldown;self.started=None;self.until=0
+    def command(self,direction,now):
+        if not direction:
+            self.started=None;return ''
+        if now<self.until:return ''
+        if self.started is None:self.started=now
+        if now-self.started>=self.duration:
+            self.started=None;self.until=now+self.cooldown;return ''
+        return direction
+    def reset(self):
+        self.started=None;self.until=0
+
+
+def apply_observation(movement,observation,now,paused=False,max_age=MAX_CAPTURE_AGE,limiter=None):
     """Temporary missing/uncertain observations release keys without losing F6 mode."""
     if paused:
         movement.disarm();return 'paused'
@@ -58,7 +74,8 @@ def apply_observation(movement,observation,now,paused=False,max_age=MAX_CAPTURE_
         movement.update('');return reason
     if observation.get('uncertain'):
         movement.update('');return observation.get('blocked_reason','vision capacity / camera uncertainty')
-    movement.update(choose_movement(observation,now,max_age=max_age))
+    direction=choose_movement(observation,now,max_age=max_age)
+    movement.update(limiter.command(direction,now) if limiter else direction)
     return ''
 
 
@@ -79,7 +96,7 @@ class MovementState:
 
 
 class WindowsMovement:
-    def __init__(self,speed=180):
+    def __init__(self,speed=180,lease=.12):
         if sys.platform != 'win32':
             raise RuntimeError('Windows input is only available on Windows')
         self.user32 = ctypes.WinDLL('user32',use_last_error=True)
@@ -108,6 +125,7 @@ class WindowsMovement:
         self.lock = threading.RLock()
         self.held = set()
         self.speed = speed
+        self.lease = lease
         self.offset = [0.0,0.0]
         self.last_motion = time.perf_counter()
         self.error = ''
@@ -183,7 +201,7 @@ class WindowsMovement:
     def update(self,direction):
         with self.lock:
             self.state.direction = direction
-            self.state.deadline = time.perf_counter()+.12
+            self.state.deadline = time.perf_counter()+self.lease
 
     def armed(self):
         with self.lock:

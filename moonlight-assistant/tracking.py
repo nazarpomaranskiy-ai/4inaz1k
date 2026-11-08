@@ -51,7 +51,7 @@ class Track:
         order=order or self.model
         if order not in self.coefficients:return np.array(self.history[-1][1:])
         coeff=self.coefficients[order];t=stamp-self.history[-1][0]
-        return coeff[0]+coeff[1]*t+(coeff[2]*t*t if len(coeff)>2 else 0)
+        return np.array(self.history[-1][1:])+coeff[1]*t+(coeff[2]*t*t if len(coeff)>2 else 0)
     def update(self,stamp,x,y,radius):
         # Score the OLD models before observing the new position: no leakage.
         if self.history:
@@ -70,8 +70,9 @@ class Track:
         self.model=2 if len(values)>=7 and 2 in self.coefficients and self.errors[2]<self.errors[1]*.85 else 1
 
 class AdaptiveTracker:
-    def __init__(self,gate=35,max_speed=1400):
+    def __init__(self,gate=35,max_speed=1400,retain_seconds=.10):
         self.gate=gate;self.max_speed=max_speed;self.tracks=[];self.counter=0;self.stamp=0
+        self.retain_seconds=retain_seconds
     def update(self,detections,dt):
         self.stamp+=dt;stamp=self.stamp
         pairs=[]
@@ -93,7 +94,7 @@ class AdaptiveTracker:
             track.update(stamp,x,y,r);used_i.add(i);used_j.add(j)
         for i,track in enumerate(self.tracks):
             if i not in used_i:track.missed+=1
-        self.tracks=[t for t in self.tracks if stamp-t.history[-1][0]<=.10 and t.missed<=3]
+        self.tracks=[t for t in self.tracks if stamp-t.history[-1][0]<=self.retain_seconds and t.missed<=3]
         for j,(x,y,r) in enumerate(detections):
             if j not in used_j:
                 track=Track(self.counter,r);self.counter+=1;track.update(stamp,x,y,r);self.tracks.append(track)

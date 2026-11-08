@@ -45,3 +45,12 @@ class ActivationTests(unittest.TestCase):
         movement=FakeMovement()
         reason=apply_observation(movement,dict(stamp=10,decision_stamp=10.01),10.15)
         self.assertIn('plan age',reason);self.assertEqual(movement.direction,'')
+
+    def test_pilot_strafe_duration_and_cooldown(self):
+        from autododge import BurstLimiter
+        limiter=BurstLimiter(.06,.1)
+        self.assertEqual(limiter.command('D',10),'D')
+        self.assertEqual(limiter.command('D',10.04),'D')
+        self.assertEqual(limiter.command('D',10.07),'')
+        self.assertEqual(limiter.command('D',10.12),'')
+        self.assertEqual(limiter.command('D',10.18),'D')

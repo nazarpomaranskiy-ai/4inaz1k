@@ -1,0 +1,2 @@
+ultralytics==8.3.203
+# Install matching CUDA torch/torchvision separately from the official PyTorch index.

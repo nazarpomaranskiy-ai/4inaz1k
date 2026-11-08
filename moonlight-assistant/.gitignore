@@ -10,3 +10,10 @@ game_data/
 learning/
 models/
 *.backup*
+capture_status*.json
+pilot_validation.json
+recordings/
+.venv-train/
+neural_runtime.json
+neural_validation.json
+training_status*.json
