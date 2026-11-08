@@ -1,5 +1,6 @@
 """One-class YOLO Fire Missile detector. Other projectiles are unsupported."""
 from pathlib import Path
+import hashlib
 import cv2
 import numpy as np
 from imaging import read_image
@@ -11,6 +12,7 @@ class NeuralFireDetector:
         self.marker=read_image(root/'pilot_assets/realm_score.png',cv2.IMREAD_GRAYSCALE)
         weights=root/'models/neural_fire.pt'
         if not weights.exists():raise FileNotFoundError('Validated Fire Missile weights are missing')
+        self.weights_sha256=hashlib.sha256(weights.read_bytes()).hexdigest()
         import torch
         from ultralytics import YOLO
         torch.set_num_threads(2)

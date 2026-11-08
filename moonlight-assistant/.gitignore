@@ -17,3 +17,6 @@ recordings/
 neural_runtime.json
 neural_validation.json
 training_status*.json
+observation_status*.json
+observations/
+Ultralytics/
